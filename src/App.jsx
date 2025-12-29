@@ -1,5 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { motion } from 'framer-motion'
 import './App.css'
+import SubjectHub from './components/SubjectHub'
+import BlitzMode from './components/BlitzMode'
+import PracticeMode from './components/PracticeMode'
+import Leaderboard from './components/Leaderboard'
 
 function App() {
   // State Management using ES6+ features
@@ -13,6 +18,12 @@ function App() {
   const [isAnswered, setIsAnswered] = useState(false)
   const [category, setCategory] = useState('9')
   const [difficulty, setDifficulty] = useState('medium')
+  const [timeLeft, setTimeLeft] = useState(15) // seconds per question
+  const [durations, setDurations] = useState([]) // per-question durations
+  const [userAnswers, setUserAnswers] = useState([])
+  const timerRef = useRef(null)
+  const questionStartRef = useRef(null)
+  const [flow, setFlow] = useState(null)
 
   // Categories from Open Trivia Database
   const categories = [
@@ -49,6 +60,9 @@ function App() {
       
       setQuestions(formattedQuestions)
       setQuizStarted(true)
+      // initialize durations
+      setDurations(new Array(formattedQuestions.length).fill(0))
+      setUserAnswers(new Array(formattedQuestions.length).fill(null))
       setLoading(false)
     } catch (error) {
       console.error('Error fetching questions:', error)
@@ -80,22 +94,42 @@ function App() {
     setSelectedAnswer(answer)
     setIsAnswered(true)
 
+    // stop timer and calculate duration for this question
+    clearInterval(timerRef.current)
+    const now = Date.now()
+    const duration = Math.round((now - (questionStartRef.current || now)) / 1000)
+    setDurations(prev => {
+      const copy = [...prev]
+      copy[currentQuestion] = duration
+      return copy
+    })
+    // record user's answer
+    setUserAnswers(prev => {
+      const copy = [...prev]
+      copy[currentQuestion] = answer === '__time_up__' ? 'Time Up' : answer
+      return copy
+    })
+
     // Check if answer is correct
     if (answer === questions[currentQuestion].correctAnswer) {
+      playSound(true)
       setScore(prevScore => prevScore + 1) // Functional setState
+    } else {
+      playSound(false)
     }
 
-    // Move to next question after delay
+    // Move to next question after short delay
     setTimeout(() => {
       const nextQuestion = currentQuestion + 1
       if (nextQuestion < questions.length) {
         setCurrentQuestion(nextQuestion)
         setSelectedAnswer(null)
         setIsAnswered(false)
+        setTimeLeft(15)
       } else {
         setShowScore(true)
       }
-    }, 1500)
+    }, 900)
   }
 
   // Reset quiz
@@ -107,6 +141,8 @@ function App() {
     setQuizStarted(false)
     setSelectedAnswer(null)
     setIsAnswered(false)
+    setTimeLeft(15)
+    setDurations([])
   }
 
   // Get button class based on answer state
@@ -121,136 +157,90 @@ function App() {
     return 'answer-button disabled'
   }
 
+  // WebAudio-based success/error sounds (no external files required)
+  const playSound = (success = true) => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)()
+      const o = ctx.createOscillator()
+      const g = ctx.createGain()
+      o.connect(g)
+      g.connect(ctx.destination)
+      o.type = success ? 'sine' : 'triangle'
+      o.frequency.value = success ? 880 : 220
+      g.gain.setValueAtTime(0.001, ctx.currentTime)
+      g.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.02)
+      o.start()
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35)
+      o.stop(ctx.currentTime + 0.36)
+    } catch (e) {
+      // ignore if audio isn't available
+    }
+  }
+
+  // Timer effect per question
+  useEffect(() => {
+    if (!quizStarted || showScore || questions.length === 0) return
+    // start timer for current question
+    clearInterval(timerRef.current)
+    setTimeLeft(15)
+    questionStartRef.current = Date.now()
+    timerRef.current = setInterval(() => {
+      setTimeLeft(prev => {
+        if (prev <= 0.1) {
+          clearInterval(timerRef.current)
+          // mark as answered incorrectly and advance
+          handleAnswerClick('__time_up__')
+          return 0
+        }
+        return +(prev - 0.1).toFixed(1)
+      })
+    }, 100)
+    return () => clearInterval(timerRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentQuestion, quizStarted, questions])
+
+  // Aggregate analytics
+  const totalTimeSpent = durations.reduce((a, b) => a + (Number(b) || 0), 0)
+  const accuracy = questions.length ? Math.round((score / questions.length) * 100) : 0
+
   return (
     <div className="app">
       <div className="quiz-container">
-        {!quizStarted ? (
-          // Quiz Setup Screen
-          <div className="setup-screen">
-            <h1>🎯 Interactive Quiz</h1>
-            <p className="subtitle">Test your knowledge across various topics!</p>
-            
-            <div className="setup-form">
-              <div className="form-group">
-                <label htmlFor="category">Select Category:</label>
-                <select 
-                  id="category"
-                  value={category} 
-                  onChange={(e) => setCategory(e.target.value)}
-                  className="select-input"
-                >
-                  {categories.map(cat => (
-                    <option key={cat.id} value={cat.id}>{cat.name}</option>
-                  ))}
-                </select>
-              </div>
+        {!quizStarted && (
+          <SubjectHub onSelectMode={(mode, subject, difficulty) => {
+            setCategory(subject)
+            setDifficulty(difficulty || 'medium')
+            setFlow({mode, subject, difficulty: difficulty || 'medium'})
+            setQuizStarted(true)
+            setShowScore(false)
+          }} />
+        )}
 
-              <div className="form-group">
-                <label htmlFor="difficulty">Select Difficulty:</label>
-                <select 
-                  id="difficulty"
-                  value={difficulty} 
-                  onChange={(e) => setDifficulty(e.target.value)}
-                  className="select-input"
-                >
-                  <option value="easy">Easy</option>
-                  <option value="medium">Medium</option>
-                  <option value="hard">Hard</option>
-                </select>
-              </div>
+        {quizStarted && flow?.mode === 'compete' && !showScore && (
+          <BlitzMode subject={flow.subject} difficulty={flow.difficulty} onFinish={(res)=>{ setScore(res.score); setShowScore(true); setQuizStarted(false)}} />
+        )}
 
-              <button 
-                className="start-button" 
-                onClick={fetchQuestions}
-                disabled={loading}
-              >
-                {loading ? 'Loading Questions...' : 'Start Quiz 🚀'}
-              </button>
-            </div>
+        {quizStarted && flow?.mode === 'practice' && !showScore && (
+          <PracticeMode subject={flow.subject} difficulty={flow.difficulty} onFinish={(res)=>{ setScore(res.score); setShowScore(true); setQuizStarted(false)}} />
+        )}
 
-            <div className="features">
-              <div className="feature">
-                <span className="feature-icon">📚</span>
-                <span>10 Questions</span>
+        {showScore && (
+          <div>
+            <div className="score-screen">
+              <h2>Quiz Completed! 🎉</h2>
+              <div className="score-display">
+                <div className="score-circle">
+                  <span className="score-number">{score}</span>
+                  <span className="score-total">/ 10</span>
+                </div>
               </div>
-              <div className="feature">
-                <span className="feature-icon">🌐</span>
-                <span>Real API Data</span>
-              </div>
-              <div className="feature">
-                <span className="feature-icon">⚡</span>
-                <span>Instant Feedback</span>
-              </div>
-            </div>
-          </div>
-        ) : showScore ? (
-          // Score Screen
-          <div className="score-screen">
-            <h2>Quiz Completed! 🎉</h2>
-            <div className="score-display">
-              <div className="score-circle">
-                <span className="score-number">{score}</span>
-                <span className="score-total">/ {questions.length}</span>
+              <div style={{display: 'flex', gap: 12, justifyContent: 'center'}}>
+                <button className="restart-button" onClick={()=>{ setShowScore(false); setQuizStarted(false); setFlow(null); }}>Back to Hub</button>
               </div>
             </div>
-            <p className="score-message">
-              {score === questions.length 
-                ? "Perfect Score! You're amazing! 🌟"
-                : score >= questions.length * 0.7
-                ? "Great job! Well done! 👏"
-                : score >= questions.length * 0.5
-                ? "Good effort! Keep practicing! 💪"
-                : "Don't give up! Try again! 🎯"}
-            </p>
-            <div className="score-percentage">
-              {Math.round((score / questions.length) * 100)}% Correct
+            <div style={{marginTop: 20}}>
+              <Leaderboard />
             </div>
-            <button className="restart-button" onClick={resetQuiz}>
-              Try Another Quiz 🔄
-            </button>
-          </div>
-        ) : (
-          // Quiz Question Screen
-          <div className="question-screen">
-            <div className="progress-bar">
-              <div 
-                className="progress-fill" 
-                style={{ width: `${((currentQuestion + 1) / questions.length) * 100}%` }}
-              />
-            </div>
-            
-            <div className="question-header">
-              <span className="question-count">
-                Question {currentQuestion + 1} of {questions.length}
-              </span>
-              <span className="score-badge">Score: {score}</span>
-            </div>
-
-            <h2 className="question-text">
-              {questions[currentQuestion]?.question}
-            </h2>
-
-            <div className="answers-grid">
-              {questions[currentQuestion]?.answers.map((answer, index) => (
-                <button
-                  key={index}
-                  className={getButtonClass(answer)}
-                  onClick={() => handleAnswerClick(answer)}
-                  disabled={isAnswered}
-                >
-                  {answer}
-                </button>
-              ))}
-            </div>
-
-            {isAnswered && (
-              <div className={`feedback ${selectedAnswer === questions[currentQuestion].correctAnswer ? 'correct-feedback' : 'incorrect-feedback'}`}>
-                {selectedAnswer === questions[currentQuestion].correctAnswer 
-                  ? '✓ Correct!' 
-                  : `✗ Wrong! Correct answer: ${questions[currentQuestion].correctAnswer}`
-                }
-              </div>
-            )}
           </div>
         )}
       </div>
